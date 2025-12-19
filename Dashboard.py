@@ -1,16 +1,15 @@
 import streamlit as st
 import pandas as pd
-import plotly.graph_objects as go
 
 # --------------------------------------------------
-# PAGE SETUP
+# PAGE CONFIG
 # --------------------------------------------------
 st.set_page_config(
     page_title="Jhagadiya BESS Decision Dashboard",
     layout="wide"
 )
 
-st.title("🔋 Jhagadiya BESS Decision Dashboard (DGVCL)")
+st.title("🔋 Jhagadiya BESS Decision Dashboard")
 st.caption("PV vs Grid charging | Date filter | Optimal decision logic")
 
 # --------------------------------------------------
@@ -41,12 +40,12 @@ def load_data():
 df = load_data()
 
 # --------------------------------------------------
-# SIDEBAR CONTROLS (POWER BI STYLE)
+# SIDEBAR CONTROLS
 # --------------------------------------------------
 st.sidebar.header("⚙ Controls")
 
 date_range = st.sidebar.date_input(
-    "📅 Select Date Range",
+    "📅 Date Range",
     [df["Datetime"].min().date(), df["Datetime"].max().date()]
 )
 
@@ -65,17 +64,16 @@ charge_mode = st.sidebar.radio(
 # --------------------------------------------------
 # FILTER DATA
 # --------------------------------------------------
-mask = (
+df = df[
     (df["Datetime"].dt.date >= date_range[0]) &
     (df["Datetime"].dt.date <= date_range[1])
-)
-df = df.loc[mask].copy()
+].copy()
 
 # --------------------------------------------------
 # BATTERY SIMULATION
 # --------------------------------------------------
 CAP = battery_mwh * 1000
-PWR = battery_mw * 1000 / 4  # per 15-min
+PWR = battery_mw * 1000 / 4
 
 soc = 0
 pv_chg, grid_chg, dis, soc_pct = [], [], [], []
@@ -88,18 +86,15 @@ for _, r in df.iterrows():
 
     if charge_mode == "PV ONLY":
         pv = min(excess, PWR, CAP - soc)
-
     elif charge_mode == "GRID ONLY":
         grid = min(PWR, CAP - soc)
-
-    elif charge_mode == "PV + GRID":
+    else:
         pv = min(excess, PWR, CAP - soc)
         rem = PWR - pv
         if rem > 0:
             grid = min(rem, CAP - soc - pv)
 
     discharge = min(deficit, PWR, soc)
-
     soc += pv + grid - discharge
 
     pv_chg.append(pv)
@@ -113,97 +108,66 @@ df["Discharge"] = dis
 df["SOC_%"] = soc_pct
 
 # --------------------------------------------------
-# KPI CALCULATIONS
-# --------------------------------------------------
-total_demand = df["Demand"].sum()
-total_solar = df["Solar"].sum()
-total_import = df["Import"].sum()
-total_export = df["Export"].sum()
-pv_to_bess = df["PV_Charge"].sum()
-grid_to_bess = df["Grid_Charge"].sum()
-bess_dis = df["Discharge"].sum()
-avg_soc = df["SOC_%"].mean()
-
-# --------------------------------------------------
-# KPI CARDS
+# KPIs
 # --------------------------------------------------
 c1, c2, c3, c4, c5, c6 = st.columns(6)
 
-c1.metric("🔌 Demand (kWh)", f"{total_demand:,.0f}")
-c2.metric("☀ Solar (kWh)", f"{total_solar:,.0f}")
-c3.metric("⬆ Import (kWh)", f"{total_import:,.0f}")
-c4.metric("⬇ Export (kWh)", f"{total_export:,.0f}")
-c5.metric("🔋 PV → BESS (kWh)", f"{pv_to_bess:,.0f}")
-c6.metric("⚡ Grid → BESS (kWh)", f"{grid_to_bess:,.0f}")
+c1.metric("Demand (kWh)", f"{df['Demand'].sum():,.0f}")
+c2.metric("Solar (kWh)", f"{df['Solar'].sum():,.0f}")
+c3.metric("Import (kWh)", f"{df['Import'].sum():,.0f}")
+c4.metric("Export (kWh)", f"{df['Export'].sum():,.0f}")
+c5.metric("PV → BESS (kWh)", f"{df['PV_Charge'].sum():,.0f}")
+c6.metric("Grid → BESS (kWh)", f"{df['Grid_Charge'].sum():,.0f}")
 
 # --------------------------------------------------
 # DEMAND vs SOLAR
 # --------------------------------------------------
-fig1 = go.Figure()
-fig1.add_trace(go.Scatter(x=df["Datetime"], y=df["Demand"], name="Demand"))
-fig1.add_trace(go.Scatter(x=df["Datetime"], y=df["Solar"], name="Solar"))
-
-fig1.update_layout(
-    title="Demand vs Solar",
-    height=300,
-    yaxis_title="kWh"
-)
-
-st.plotly_chart(fig1, use_container_width=True)
+st.subheader("Demand vs Solar")
+st.line_chart(df.set_index("Datetime")[["Demand", "Solar"]])
 
 # --------------------------------------------------
 # BATTERY CHARGE / DISCHARGE
 # --------------------------------------------------
-fig2 = go.Figure()
-fig2.add_trace(go.Bar(x=df["Datetime"], y=df["PV_Charge"], name="Charge from PV"))
-fig2.add_trace(go.Bar(x=df["Datetime"], y=df["Grid_Charge"], name="Charge from Grid"))
-fig2.add_trace(go.Bar(x=df["Datetime"], y=-df["Discharge"], name="Discharge"))
-
-fig2.update_layout(
-    title="Battery Charge / Discharge",
-    barmode="relative",
-    height=300,
-    yaxis_title="kWh"
+st.subheader("Battery Charge / Discharge")
+st.bar_chart(
+    df.set_index("Datetime")[["PV_Charge", "Grid_Charge", "Discharge"]]
 )
 
-st.plotly_chart(fig2, use_container_width=True)
+# --------------------------------------------------
+# SOC (%)
+# --------------------------------------------------
+st.subheader("State of Charge (%)")
+st.line_chart(df.set_index("Datetime")[["SOC_%"]])
 
 # --------------------------------------------------
-# SOC %
+# DECISION LOGIC
 # --------------------------------------------------
-fig3 = go.Figure()
-fig3.add_trace(go.Scatter(
-    x=df["Datetime"], y=df["SOC_%"],
-    fill="tozeroy", name="SOC (%)"
-))
-fig3.update_layout(
-    title="State of Charge (%)",
-    height=300,
-    yaxis=dict(range=[0, 100])
+export_avoided_pct = (
+    df["PV_Charge"].sum() / df["Export"].sum() * 100
+    if df["Export"].sum() > 0 else 0
 )
 
-st.plotly_chart(fig3, use_container_width=True)
+avg_soc = df["SOC_%"].mean()
+grid_dependency = (
+    df["Grid_Charge"].sum() /
+    (df["PV_Charge"].sum() + df["Grid_Charge"].sum()) * 100
+    if (df["PV_Charge"].sum() + df["Grid_Charge"].sum()) > 0 else 0
+)
 
-# --------------------------------------------------
-# OPTIMAL DECISION LOGIC
-# --------------------------------------------------
-export_avoided_pct = pv_to_bess / total_export * 100 if total_export > 0 else 0
-grid_dependency = grid_to_bess / (pv_to_bess + grid_to_bess) * 100 if (pv_to_bess + grid_to_bess) > 0 else 0
-
-st.subheader("🧠 BESS Decision Verdict")
+st.subheader("🧠 Decision Verdict")
 
 if export_avoided_pct > 60 and avg_soc > 65 and grid_dependency < 40:
     st.success(
-        f"✅ OPTIMAL CONFIGURATION\n\n"
+        f"✅ OPTIMAL\n\n"
         f"• Export avoided: {export_avoided_pct:.1f}%\n"
-        f"• Average SOC: {avg_soc:.1f}%\n"
+        f"• Avg SOC: {avg_soc:.1f}%\n"
         f"• Grid charging: {grid_dependency:.1f}%"
     )
 else:
     st.warning(
         f"⚠ NOT OPTIMAL\n\n"
         f"• Export avoided: {export_avoided_pct:.1f}%\n"
-        f"• Average SOC: {avg_soc:.1f}%\n"
+        f"• Avg SOC: {avg_soc:.1f}%\n"
         f"• Grid charging: {grid_dependency:.1f}%\n\n"
         f"Reason: Low export utilization or high grid dependency"
     )
